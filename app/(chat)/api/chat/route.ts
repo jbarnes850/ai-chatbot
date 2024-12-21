@@ -30,6 +30,7 @@ import {
   getMostRecentUserMessage,
   sanitizeResponseMessages,
 } from '@/lib/utils';
+import { searchWeb, getContextForQuery } from '@/lib/search';
 
 import { generateTitleFromUserMessage } from '../../actions';
 
@@ -39,7 +40,8 @@ type AllowedTools =
   | 'createDocument'
   | 'updateDocument'
   | 'requestSuggestions'
-  | 'getWeather';
+  | 'getWeather'
+  | 'webSearch';
 
 const blocksTools: AllowedTools[] = [
   'createDocument',
@@ -49,26 +51,35 @@ const blocksTools: AllowedTools[] = [
 
 const weatherTools: AllowedTools[] = ['getWeather'];
 
-const allTools: AllowedTools[] = [...blocksTools, ...weatherTools];
+const allTools: AllowedTools[] = [...blocksTools, ...weatherTools, 'webSearch'];
 
 export async function POST(request: Request) {
-  const {
-    id,
-    messages,
-    modelId,
-  }: { id: string; messages: Array<Message>; modelId: string } =
-    await request.json();
+  const json = await request.json();
+  const { messages, modelId } = json;
+  
+  const model = models.find(m => m.id === modelId);
+  if (!model) {
+    return new Response('Model not found', { status: 404 });
+  }
+
+  const { fullStream } = streamText({
+    model: customModel(model),
+    system: systemPrompt,
+    prompt: messages[messages.length - 1].content,
+    experimental_providerMetadata: {
+      [model.provider]: {
+        prediction: {
+          type: 'content',
+          content: messages,
+        },
+      },
+    },
+  });
 
   const session = await auth();
 
   if (!session || !session.user || !session.user.id) {
     return new Response('Unauthorized', { status: 401 });
-  }
-
-  const model = models.find((model) => model.id === modelId);
-
-  if (!model) {
-    return new Response('Model not found', { status: 404 });
   }
 
   const coreMessages = convertToCoreMessages(messages);
@@ -408,6 +419,22 @@ export async function POST(request: Request) {
               };
             },
           },
+          webSearch: {
+            description: 'Search the web for current information about NEAR Protocol and blockchain development',
+            parameters: z.object({
+              query: z.string().describe('The search query to look up'),
+              type: z.enum(['quick', 'detailed']).describe('Type of search to perform')
+            }),
+            execute: async ({ query, type }) => {
+              if (type === 'quick') {
+                const context = await getContextForQuery(query);
+                return { context };
+              } else {
+                const results = await searchWeb(query);
+                return { results };
+              }
+            }
+          }
         },
         onFinish: async ({ response }) => {
           if (session.user?.id) {
